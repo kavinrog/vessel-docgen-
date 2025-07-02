@@ -1,16 +1,16 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import Optional
-import os
-from pdfrw import PdfReader, PdfWriter, PdfDict, PdfName, PdfObject
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from pdfrw import PdfReader, PdfWriter, PdfDict
+import io
 
-app = FastAPI()
+app = FastAPI(
+    title="USCG PDF Form Filler",
+    description="Receives JSON data, fills the CG-1258 form, and returns a PDF.",
+    version="1.0.0"
+)
 
-PDF_TEMPLATE_PATH = "uscg.pdf"
-FILLED_PDF_PATH = "filled_uscg.pdf"
-
-# Define Pydantic models
+# Pydantic models representing incoming JSON structure
 class Coordinates(BaseModel):
     longitude: float
     latitude: float
@@ -19,21 +19,21 @@ class Location(BaseModel):
     fullAddress: str
     country: str
     city: str
-    state: Optional[str]
+    state: str | None
     coordinates: Coordinates
 
 class VesselInfo(BaseModel):
     hullNumber: str
     vesselLength: float
-    horsepower: float
+    horsepower: int
     make: str
     year: int
     model: str
     location: Location
     fuelType: str
     vesselType: str
-    engineType: Optional[str]
-    hullMaterial: Optional[str]
+    engineType: str | None
+    hullMaterial: str | None
 
 class USCGInfo(BaseModel):
     hailingPort: str
@@ -46,7 +46,7 @@ class USARegistrationInfo(BaseModel):
     city: str
     state: str
     street: str
-    apartment: Optional[str]
+    apartment: str | None
     postalCode: str
     stateTitle: str
     stateRegistration: str
@@ -65,69 +65,74 @@ class BuyerInfo(BaseModel):
 class DealerInfo(BaseModel):
     name: str
     city: str
-    state: Optional[str]
+    state: str | None
     zipCode: str
-    ein: Optional[str]
+    ein: str | None
 
-class RequestModel(BaseModel):
+class InputData(BaseModel):
     vesselInfo: VesselInfo
     usaRegistrationInfo: USARegistrationInfo
     buyerInfo: BuyerInfo
-    coBuyerInfo: Optional[dict]
+    coBuyerInfo: dict | None
     dealerInfo: DealerInfo
     closingDate: str
     purchasePrice: float
     taxCollected: float
-    previousOwnerName: Optional[str]
+    previousOwnerName: str | None
 
-# Map PDF field names to values
-def map_fields(data: RequestModel):
-    return {
-        'txtVesselName[0]': data.usaRegistrationInfo.uscg.newVesselName,
-        'txtOfficialNo[0]': data.usaRegistrationInfo.uscg.uscgOfficialNumber,
-        'txtHullID[0]': data.vesselInfo.hullNumber,
-        'txtHailingPort[0]': data.usaRegistrationInfo.uscg.hailingPort,
-        'txtManagingOwner[0]': data.buyerInfo.name,
-        'txtEmail[0]': data.buyerInfo.email,
-        'txtPhoneNo[0]': data.buyerInfo.phone,
-        'txtSSN[0]': data.usaRegistrationInfo.uscg.ssn,
-        'txtPhysicalAddress[0]': data.buyerInfo.fullAddress,
-        'txtLength[0]': str(data.vesselInfo.vesselLength),
-        'txtDescribe[0]': data.vesselInfo.hullMaterial or '',
-        'txtIN[0]': str(data.vesselInfo.year),
-        'txtAT[0]': f"{data.vesselInfo.location.city}, {data.vesselInfo.location.country}"
-    }
+# Mapping from PDF field names to JSON attribute paths
+FIELD_MAP = {
+    "txtVesselName": "usaRegistrationInfo.uscg.newVesselName",
+    "txtOfficialNo": "usaRegistrationInfo.uscg.uscgOfficialNumber",
+    "txtHullID": "vesselInfo.hullNumber",
+    "txtHailingPort": "usaRegistrationInfo.uscg.hailingPort",
+    "txtManagingOwner": "buyerInfo.name",
+    "txtEmail": "buyerInfo.email",
+    "txtPhoneNo": "buyerInfo.phone",
+    "txtSSN": "usaRegistrationInfo.uscg.ssn",
+    "txtPhysicalAddress": "buyerInfo.fullAddress",
+    "txtMailingAddress": "usaRegistrationInfo.street",
+    "txtCity": "usaRegistrationInfo.city",
+    "txtState": "usaRegistrationInfo.state",
+    "txtPostalCode": "usaRegistrationInfo.postalCode"
+}
 
-# Fill and flatten PDF
-def fill_pdf(input_pdf_path, output_pdf_path, field_data):
-    template_pdf = PdfReader(input_pdf_path)
-    
-    if not template_pdf.Root.AcroForm:
-        template_pdf.Root.AcroForm = PdfDict()
-    template_pdf.Root.AcroForm.update(PdfDict(NeedAppearances=PdfObject('true')))
-
-    for page in template_pdf.pages:
-        annotations = page.Annots
-        if annotations:
-            for annotation in annotations:
-                if annotation.Subtype == PdfName.Widget and annotation.T:
-                    key = annotation.T.to_unicode()
-                    if key in field_data:
-                        annotation.V = PdfObject(str(field_data[key]))
-                        annotation.AP = PdfDict()
-
-    PdfWriter(output_pdf_path, trailer=template_pdf).write()
-
-# POST endpoint to fill PDF
-@app.post("/fill-pdf")
-def fill_form(data: RequestModel):
+@app.post("/fill-form", summary="Fill USCG CG-1258 PDF form")
+async def fill_form(data: InputData):
     try:
-        field_data = map_fields(data)
-        fill_pdf(PDF_TEMPLATE_PATH, FILLED_PDF_PATH, field_data)
-        return FileResponse(FILLED_PDF_PATH, media_type='application/pdf', filename='filled_uscg.pdf')
+        # Load the PDF template
+        template_pdf = PdfReader("uscg.pdf")
+        annotations = template_pdf.pages[0]['/Annots']
+
+        # Iterate over the annotations (form fields) and set values
+        for annotation in annotations:
+            if annotation['/Subtype'] == '/Widget' and annotation.get('/T'):
+                field_name = annotation['/T'][1:-1]  # strip parentheses
+                if field_name in FIELD_MAP:
+                    # Resolve the attribute path
+                    attr_path = FIELD_MAP[field_name].split('.')
+                    value = data
+                    for attr in attr_path:
+                        value = getattr(value, attr)
+                    # Set the field value
+                    annotation.update(
+                        PdfDict(V='{}'.format(value), AP=None)
+                    )
+        # Write filled PDF to memory
+        output_stream = io.BytesIO()
+        PdfWriter().write(output_stream, template_pdf)
+        output_stream.seek(0)
+
+        # Return as downloadable PDF
+        return StreamingResponse(
+            output_stream,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=filled_cg1258.pdf"}
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/")
-def read_root():
-    return {"message": "Go to /docs to use the PDF fill API"}
+# For running via `uvicorn main:app --reload`
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
