@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from typing import Optional
 from pdfrw import PdfReader, PdfWriter, PdfDict
 import io
 
@@ -19,7 +20,7 @@ class Location(BaseModel):
     fullAddress: str
     country: str
     city: str
-    state: str | None
+    state: Optional[str] = None
     coordinates: Coordinates
 
 class VesselInfo(BaseModel):
@@ -32,8 +33,8 @@ class VesselInfo(BaseModel):
     location: Location
     fuelType: str
     vesselType: str
-    engineType: str | None
-    hullMaterial: str | None
+    engineType: Optional[str] = None
+    hullMaterial: Optional[str] = None
 
 class USCGInfo(BaseModel):
     hailingPort: str
@@ -46,7 +47,7 @@ class USARegistrationInfo(BaseModel):
     city: str
     state: str
     street: str
-    apartment: str | None
+    apartment: Optional[str] = None
     postalCode: str
     stateTitle: str
     stateRegistration: str
@@ -65,20 +66,20 @@ class BuyerInfo(BaseModel):
 class DealerInfo(BaseModel):
     name: str
     city: str
-    state: str | None
+    state: Optional[str] = None
     zipCode: str
-    ein: str | None
+    ein: Optional[str] = None
 
 class InputData(BaseModel):
     vesselInfo: VesselInfo
     usaRegistrationInfo: USARegistrationInfo
     buyerInfo: BuyerInfo
-    coBuyerInfo: dict | None
+    coBuyerInfo: Optional[dict] = None
     dealerInfo: DealerInfo
     closingDate: str
     purchasePrice: float
     taxCollected: float
-    previousOwnerName: str | None
+    previousOwnerName: Optional[str] = None
 
 # Mapping from PDF field names to JSON attribute paths
 FIELD_MAP = {
