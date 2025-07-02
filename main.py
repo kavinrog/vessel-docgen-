@@ -3,13 +3,14 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 import os
-from PyPDF2 import PdfReader, PdfWriter
+from pdfrw import PdfReader, PdfWriter, PdfDict, PdfName, PdfObject
 
 app = FastAPI()
 
 PDF_TEMPLATE_PATH = "uscg.pdf"
 FILLED_PDF_PATH = "filled_uscg.pdf"
 
+# Define Pydantic models
 class Coordinates(BaseModel):
     longitude: float
     latitude: float
@@ -79,39 +80,45 @@ class RequestModel(BaseModel):
     taxCollected: float
     previousOwnerName: Optional[str]
 
+# Map PDF field names to values
 def map_fields(data: RequestModel):
     return {
-        'txtVesselName': data.usaRegistrationInfo.uscg.newVesselName,
-        'txtOfficialNo': data.usaRegistrationInfo.uscg.uscgOfficialNumber,
-        'txtHullID': data.vesselInfo.hullNumber,
-        'txtHailingPort': data.usaRegistrationInfo.uscg.hailingPort,
-        'txtManagingOwner': data.buyerInfo.name,
-        'txtEmail': data.buyerInfo.email,
-        'txtPhoneNo': data.buyerInfo.phone,
-        'txtSSN': data.usaRegistrationInfo.uscg.ssn,
-        'txtPhysicalAddress': data.buyerInfo.fullAddress,
-        'txtLength': str(data.vesselInfo.vesselLength),
-        'txtDescribe': data.vesselInfo.hullMaterial or '',
-        'txtIN': str(data.vesselInfo.year),
-        'txtAT': f"{data.vesselInfo.location.city}, {data.vesselInfo.location.country}"
+        'txtVesselName[0]': data.usaRegistrationInfo.uscg.newVesselName,
+        'txtOfficialNo[0]': data.usaRegistrationInfo.uscg.uscgOfficialNumber,
+        'txtHullID[0]': data.vesselInfo.hullNumber,
+        'txtHailingPort[0]': data.usaRegistrationInfo.uscg.hailingPort,
+        'txtManagingOwner[0]': data.buyerInfo.name,
+        'txtEmail[0]': data.buyerInfo.email,
+        'txtPhoneNo[0]': data.buyerInfo.phone,
+        'txtSSN[0]': data.usaRegistrationInfo.uscg.ssn,
+        'txtPhysicalAddress[0]': data.buyerInfo.fullAddress,
+        'txtLength[0]': str(data.vesselInfo.vesselLength),
+        'txtDescribe[0]': data.vesselInfo.hullMaterial or '',
+        'txtIN[0]': str(data.vesselInfo.year),
+        'txtAT[0]': f"{data.vesselInfo.location.city}, {data.vesselInfo.location.country}"
     }
 
+# Fill and flatten PDF
 def fill_pdf(input_pdf_path, output_pdf_path, field_data):
-    reader = PdfReader(input_pdf_path)
-    writer = PdfWriter()
+    template_pdf = PdfReader(input_pdf_path)
+    
+    if not template_pdf.Root.AcroForm:
+        template_pdf.Root.AcroForm = PdfDict()
+    template_pdf.Root.AcroForm.update(PdfDict(NeedAppearances=PdfObject('true')))
 
-    for page in reader.pages:
-        writer.add_page(page)
+    for page in template_pdf.pages:
+        annotations = page.Annots
+        if annotations:
+            for annotation in annotations:
+                if annotation.Subtype == PdfName.Widget and annotation.T:
+                    key = annotation.T.to_unicode()
+                    if key in field_data:
+                        annotation.V = PdfObject(str(field_data[key]))
+                        annotation.AP = PdfDict()
 
-    writer.update_page_form_field_values(writer.pages[0], field_data)
+    PdfWriter(output_pdf_path, trailer=template_pdf).write()
 
-    # Flatten the form (makes filled values permanent)
-    for j in range(len(writer.pages)):
-        writer.pages[j].compress_content_streams()
-
-    with open(output_pdf_path, "wb") as f:
-        writer.write(f)
-
+# POST endpoint to fill PDF
 @app.post("/fill-pdf")
 def fill_form(data: RequestModel):
     try:
