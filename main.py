@@ -1,17 +1,14 @@
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
-import tempfile
-import shutil
 import os
-from pdfrw import PdfReader, PdfWriter, PageMerge
-from pdfrw import PdfDict, PdfName, PdfObject
+from PyPDF2 import PdfReader, PdfWriter
 
 app = FastAPI()
 
-PDF_TEMPLATE_PATH = "vessel-docgen-/uscg.pdf"
-FILLED_PDF_PATH = "vessel-docgen-/filled_uscg.pdf"
+PDF_TEMPLATE_PATH = "uscg.pdf"
+FILLED_PDF_PATH = "filled_uscg.pdf"
 
 class Coordinates(BaseModel):
     longitude: float
@@ -83,35 +80,37 @@ class RequestModel(BaseModel):
     previousOwnerName: Optional[str]
 
 def map_fields(data: RequestModel):
-    annotations = {
-        'txtVesselName[0]': data.usaRegistrationInfo.uscg.newVesselName,
-        'txtOfficialNo[0]': data.usaRegistrationInfo.uscg.uscgOfficialNumber,
-        'txtHullID[0]': data.vesselInfo.hullNumber,
-        'txtHailingPort[0]': data.usaRegistrationInfo.uscg.hailingPort,
-        'txtManagingOwner[0]': data.buyerInfo.name,
-        'txtEmail[0]': data.buyerInfo.email,
-        'txtPhoneNo[0]': data.buyerInfo.phone,
-        'txtSSN[0]': data.usaRegistrationInfo.uscg.ssn,
-        'txtPhysicalAddress[0]': data.buyerInfo.fullAddress,
-        'txtLength[0]': str(data.vesselInfo.vesselLength),
-        'txtDescribe[0]': data.vesselInfo.hullMaterial or '',
-        'txtIN[0]': str(data.vesselInfo.year),
-        'txtAT[0]': f"{data.vesselInfo.location.city}, {data.vesselInfo.location.country}"
+    return {
+        'txtVesselName': data.usaRegistrationInfo.uscg.newVesselName,
+        'txtOfficialNo': data.usaRegistrationInfo.uscg.uscgOfficialNumber,
+        'txtHullID': data.vesselInfo.hullNumber,
+        'txtHailingPort': data.usaRegistrationInfo.uscg.hailingPort,
+        'txtManagingOwner': data.buyerInfo.name,
+        'txtEmail': data.buyerInfo.email,
+        'txtPhoneNo': data.buyerInfo.phone,
+        'txtSSN': data.usaRegistrationInfo.uscg.ssn,
+        'txtPhysicalAddress': data.buyerInfo.fullAddress,
+        'txtLength': str(data.vesselInfo.vesselLength),
+        'txtDescribe': data.vesselInfo.hullMaterial or '',
+        'txtIN': str(data.vesselInfo.year),
+        'txtAT': f"{data.vesselInfo.location.city}, {data.vesselInfo.location.country}"
     }
-    return annotations
 
 def fill_pdf(input_pdf_path, output_pdf_path, field_data):
-    template_pdf = PdfReader(input_pdf_path)
-    for page in template_pdf.pages:
-        annotations = page.Annots
-        if annotations:
-            for annotation in annotations:
-                if annotation.Subtype == PdfName.Widget and annotation.T:
-                    key = annotation.T.to_unicode()
-                    if key in field_data:
-                        annotation.V = PdfObject(str(field_data[key]))
-                        annotation.AP = PdfDict()
-    PdfWriter(output_pdf_path, trailer=template_pdf).write()
+    reader = PdfReader(input_pdf_path)
+    writer = PdfWriter()
+
+    for page in reader.pages:
+        writer.add_page(page)
+
+    writer.update_page_form_field_values(writer.pages[0], field_data)
+
+    # Flatten the form (makes filled values permanent)
+    for j in range(len(writer.pages)):
+        writer.pages[j].compress_content_streams()
+
+    with open(output_pdf_path, "wb") as f:
+        writer.write(f)
 
 @app.post("/fill-pdf")
 def fill_form(data: RequestModel):
@@ -121,6 +120,7 @@ def fill_form(data: RequestModel):
         return FileResponse(FILLED_PDF_PATH, media_type='application/pdf', filename='filled_uscg.pdf')
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/")
 def read_root():
     return {"message": "Go to /docs to use the PDF fill API"}
